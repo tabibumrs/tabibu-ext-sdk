@@ -1,0 +1,11 @@
+[extension]
+name              = "hello-world"
+version           = "1.0.0"
+description       = "Minimal Tabibu extension — no UI, no broker"
+author            = "Your Name <you@example.com>"
+category          = "other"
+min_tabibu        = "1.0.0"
+stop_grace_period = 10
+
+[extension.config]
+greeting = "Hello from Tabibu!"
