@@ -2,22 +2,26 @@
 
 Go SDK for building Tabibu extensions. Import it in your extension's `main` package, implement the `Extension` interface, and call `sdk.Run`.
 
-The SDK handles:
-
-- `.env` loading on startup (dev convenience)
-- API key → JWT exchange on startup and background refresh
-- Pine HTTP server on `EXT_PORT`
-- Static UI serving from `ui/dist/` in production
-- Broker subscription (RabbitMQ or Kafka) for event-driven extensions
-- Graceful drain on SIGTERM — calls `OnShutdown`, notifies Tabibu, then exits 0
+Extensions run as native child processes managed by the Tabibu server — the same model VS Code uses for its extensions. There are no Docker requirements, no broker credentials, and no direct database access. The SDK handles all IPC and lifecycle details.
 
 ---
 
-## Requirements
+## How it works
 
-- Go 1.24+
-- A running Tabibu server
-- For event-driven extensions: a RabbitMQ or Kafka broker (Tabibu's SQLite broker cannot be used from external processes)
+```
+Tabibu Server
+│
+│  stdin  ──────────────────────────→  Extension process
+│  (events, actions, config, shutdown)
+│
+│  stdout ←──────────────────────────  Extension process
+│  (service requests, heartbeats, drain_done)
+│
+│  HTTP   ←──────────────────────────  Extension WebView
+│  (EXT_HTTP_PORT, Pine server inside the extension)
+```
+
+Each message is a single JSON line (NDJSON). The SDK reads from `os.Stdin` and writes to `os.Stdout` automatically — extension authors write zero protocol code.
 
 ---
 
@@ -37,170 +41,127 @@ package main
 import (
     "context"
     "log"
-    "net/http"
 
     sdk "github.com/Nexus-Labs-254/tabibu-ext-sdk"
 )
-
-type MyExtension struct{}
-
-func (e *MyExtension) OnStart(ctx context.Context, server sdk.Server) error {
-    server.Get("/health", func(c sdk.Ctx) error {
-        return c.JSON(map[string]string{"status": "ok"})
-    })
-    return nil
-}
-
-func (e *MyExtension) OnEvent(ctx context.Context, event sdk.Event) error {
-    sdk.Log.Info("received event", map[string]any{"name": event.Name})
-    return nil
-}
-
-func (e *MyExtension) OnShutdown(ctx context.Context) error { return nil }
-
-func (e *MyExtension) OnConfigUpdate(ctx context.Context, cfg sdk.Config) error { return nil }
 
 func main() {
     if err := sdk.Run(&MyExtension{}); err != nil {
         log.Fatal(err)
     }
 }
-```
 
-See the [hello-world example](examples/hello-world/) for a fuller walkthrough.
+type MyExtension struct{}
 
----
-
-## The `Extension` interface
-
-```go
-type Extension interface {
-    // Called once after the SDK is ready. Register HTTP routes here.
-    // Return a non-nil error to abort startup.
-    OnStart(ctx context.Context, server Server) error
-
-    // Called for each broker message matching EXT_SUBSCRIBE_EVENTS.
-    // Return non-nil to nack / retry the message.
-    OnEvent(ctx context.Context, event Event) error
-
-    // Called on SIGTERM. Finish in-flight work and return.
-    // The SDK posts drain-complete to Tabibu and exits 0.
-    OnShutdown(ctx context.Context) error
-
-    // Called when the extension's config is updated in the Tabibu admin panel.
-    OnConfigUpdate(ctx context.Context, cfg Config) error
-}
-```
-
----
-
-## Registering HTTP routes
-
-Routes are registered on the `Server` interface provided to `OnStart`. The server is a thin wrapper over [Pine](https://github.com/BryanMwangi/pine).
-
-```go
 func (e *MyExtension) OnStart(ctx context.Context, server sdk.Server) error {
-    server.Get("/items", e.listItems)
-    server.Post("/items", e.createItem)
-    server.Put("/items/:id", e.updateItem)
-    server.Delete("/items/:id", e.deleteItem)
+    server.Get("/hello", func(c sdk.Ctx) error {
+        return c.JSON(map[string]string{"hello": "world"})
+    })
     return nil
 }
 
-func (e *MyExtension) listItems(c sdk.Ctx) error {
-    id := c.Params("id")
-    q  := c.Query("filter")
-    hdr := c.Header("X-Custom")
-    return c.JSON(map[string]any{"id": id, "filter": q, "header": hdr})
+func (e *MyExtension) OnEvent(ctx context.Context, event sdk.Event) error {
+    sdk.Log.Info("event received", map[string]any{"name": event.Name})
+    return nil
 }
 
-func (e *MyExtension) createItem(c sdk.Ctx) error {
-    var body struct{ Name string `json:"name"` }
-    if err := c.BindJSON(&body); err != nil {
-        return c.Status(http.StatusBadRequest).JSON(map[string]string{"error": "invalid body"})
-    }
-    return c.Status(http.StatusCreated).JSON(map[string]string{"name": body.Name})
+func (e *MyExtension) OnShutdown(ctx context.Context) error {
+    return nil // finish in-flight work here
+}
+
+func (e *MyExtension) OnConfigUpdate(ctx context.Context, cfg sdk.Config) error {
+    // cfg["EXAMPLE_KEY"] — read-only values set in the Tabibu admin panel
+    return nil
 }
 ```
 
-All routes are served on `EXT_PORT` (default `9000`). Tabibu routes `/v1/ui/:name/*` to them via its reverse proxy.
+---
+
+## Env vars
+
+These are set by the Extension Runtime when it spawns your process. You do **not** set them yourself in production; in dev mode, put them in `.env`:
+
+| Variable | Description |
+|---|---|
+| `EXT_NAME` | Extension name (matches `manifest.toml`) |
+| `EXT_HTTP_PORT` | Port for the Pine HTTP server (WebView and extension routes) |
+| `EXT_DATA_DIR` | Persistent data directory for this extension |
+| `EXT_DEV` | `"true"` in dev mode — disables static UI serving |
+| `EXT_SERVER_URL` | Tabibu server URL — used only by `sdk.HTTPClient()` |
+
+### Old vars removed
+
+| Old | Replacement |
+|---|---|
+| `TABIBU_URL` | `EXT_SERVER_URL` (only needed for `HTTPClient()` escape hatch) |
+| `TABIBU_API_KEY` | Written to `$EXT_DATA_DIR/.api_key` by the Runtime automatically |
+| `EXT_PORT` | `EXT_HTTP_PORT` |
+| `BROKER_URL` | Removed — events route through the Runtime over stdin |
+| `BROKER_TYPE` | Removed |
+| `EXT_SUBSCRIBE_EVENTS` | Declare in `manifest.toml [[contributes.events]]` instead |
+| `TABIBU_DEV` | `EXT_DEV` |
 
 ---
 
-## Handling events
+## Service layer
 
-Events arrive when the Tabibu broker publishes a topic that matches `EXT_SUBSCRIBE_EVENTS`. Typed payload structs for known Tabibu events are included in the SDK.
+Instead of calling Tabibu's HTTP APIs directly, use the service accessors. Calls are routed through the IPC channel to the Extension Runtime, which executes them in-process.
+
+### `sdk.Patients()`
+
+```go
+// List patients
+patients, err := sdk.Patients().List(ctx, "John")
+
+// Get a single patient
+patient, err := sdk.Patients().Get(ctx, "uuid-here")
+
+// Register a new patient
+patient, err := sdk.Patients().Register(ctx, sdk.RegisterPatientRequest{
+    GivenName:  "Jane",
+    FamilyName: "Doe",
+    Sex:        "F",
+    Phone:      "+254700000000",
+})
+```
+
+### `sdk.GetConfig()`
+
+Returns the extension's own config map — key/value pairs declared in `manifest.toml [extension.config]` and editable in the Tabibu admin panel. Values are **read-only** from the extension's perspective; updates flow inward via `OnConfigUpdate`.
+
+```go
+cfg := sdk.GetConfig()
+shortcode := cfg["shortcode"]
+```
+
+### `sdk.HTTPClient()` — escape hatch
+
+Returns a `*client` that is pre-authenticated with a JWT (exchanged from the API key written to `$EXT_DATA_DIR/.api_key`). Use this for Tabibu API calls not yet covered by the service layer.
+
+```go
+resp, err := sdk.HTTPClient().Get(ctx, "/v1/billing/bills/"+billID)
+```
+
+---
+
+## Events
+
+Subscribe to events by declaring them in `manifest.toml`:
+
+```toml
+[[contributes.events]]
+subscribe = "billing.payment_requested"
+```
+
+The Extension Runtime subscribes to the broker on your behalf and delivers matching events to `OnEvent` over stdin. Extensions never hold broker credentials.
 
 ```go
 func (e *MyExtension) OnEvent(ctx context.Context, event sdk.Event) error {
     switch event.Name {
-
     case sdk.EventPaymentRequested:
-        var p sdk.PaymentRequestedPayload
-        if err := json.Unmarshal(event.Payload, &p); err != nil {
-            return err
-        }
-        return e.handlePayment(ctx, p)
-
-    case sdk.EventBillCancelled:
-        var p sdk.BillCancelledPayload
-        if err := json.Unmarshal(event.Payload, &p); err != nil {
-            return err
-        }
-        return e.handleCancellation(ctx, p)
-    }
-    return nil
-}
-```
-
-Returning a non-nil error causes the message to be nacked (RabbitMQ) or left uncommitted (Kafka) and retried.
-
-> **Note:** events require a network-accessible broker. Tabibu's built-in SQLite broker is in-process only and cannot be reached from extension containers. Configure RabbitMQ or Kafka before subscribing to events.
-
----
-
-## Calling back to Tabibu
-
-The SDK's HTTP client is pre-authenticated with the JWT obtained at startup and automatically refreshes it. Access it via the `Client` field exposed on `sdk.Run`'s internal state — or build your own requests using the `TABIBU_URL` env var and the `Authorization: Bearer <token>` header that the SDK manages.
-
-A simple pattern is to capture a reference to the client in `OnStart`:
-
-```go
-// In practice, expose the client from sdk.Run or build a thin wrapper.
-// The SDK guarantees TABIBU_URL and the JWT are set before OnStart is called.
-func (e *MyExtension) OnStart(ctx context.Context, server sdk.Server) error {
-    tabibuURL := os.Getenv("TABIBU_URL")
-
-    server.Post("/action", func(c sdk.Ctx) error {
-        // The SDK's client is internal; build the request manually using the
-        // JWT the extension obtained via the standard token exchange.
-        req, _ := http.NewRequestWithContext(c.Context(), http.MethodGet,
-            tabibuURL+"/v1/billing/bills", nil)
-        req.Header.Set("Authorization", "Bearer "+e.token) // set in OnStart after exchange
-        resp, err := http.DefaultClient.Do(req)
-        // ...
-        return c.JSON(map[string]string{"status": "ok"})
-    })
-    return nil
-}
-```
-
-Extensions call the same `/v1/` routes the Tabibu mobile app uses. No separate extension-specific API exists.
-
----
-
-## Config
-
-`OnConfigUpdate` receives a `Config` (a `map[string]string`) whenever the admin updates the extension's configuration in the Tabibu admin panel. Apply values to running state:
-
-```go
-type MyExtension struct {
-    greeting string
-}
-
-func (e *MyExtension) OnConfigUpdate(_ context.Context, cfg sdk.Config) error {
-    if v, ok := cfg["greeting"]; ok {
-        e.greeting = v
+        var payload sdk.PaymentRequestedPayload
+        _ = json.Unmarshal(event.Payload, &payload)
+        // handle payment...
     }
     return nil
 }
@@ -208,138 +169,130 @@ func (e *MyExtension) OnConfigUpdate(_ context.Context, cfg sdk.Config) error {
 
 ---
 
-## Logging
+## Dev mode — hot reload
 
-`sdk.Log` is a structured logger available after `Run()` starts. It writes JSON to both `logs/extension.log` and stderr.
+### Go backend
 
-```go
-sdk.Log.Info("payment initiated", map[string]any{"bill_id": billID, "amount": amount})
-sdk.Log.Warn("retrying request", map[string]any{"attempt": 2})
-sdk.Log.Error("mpesa callback failed", map[string]any{"error": err.Error()})
+In dev mode the Extension Runtime spawns your extension using `go run .` in the source directory instead of the compiled binary. This lets tools like `air` manage restarts on file changes.
+
+**No extra configuration is needed.** When you run:
+
+```bash
+tabibu server start --dev --ext-dev-dir ./path/to/my-extension
 ```
 
+the server:
+1. Reads `manifest.toml` from the dev path
+2. Registers the extension in the DB (idempotent)
+3. Spawns `go run .` in the source directory with `EXT_DEV=true`
+
+Reload after a Go change:
+
+```bash
+tabibu extension reload my-extension
+```
+
+Or install `air` for automatic restarts:
+
+```bash
+go install github.com/air-verse/air@latest
+# In your extension directory:
+air
+```
+
+### UI hot reload (Vite)
+
+Declare `dev_port` in `manifest.toml`:
+
+```toml
+[extension.ui]
+has_ui   = true
+dev_port = 5173
+```
+
+When `EXT_DEV=true`, the Extension Runtime proxies `GET /v1/ui/<name>/*` to `http://localhost:<dev_port>` instead of the compiled `ui/dist/`. Start Vite separately:
+
+```bash
+cd my-extension/ui && npm run dev   # Vite listens on dev_port
+```
+
+Changes appear instantly — no reload needed.
+
+In production (no `EXT_DEV`), the Runtime proxies to the Pine HTTP server inside the extension process (`EXT_HTTP_PORT`), which serves `ui/dist/` as a SPA.
+
 ---
 
-## Environment variables
-
-| Variable               | Required   | Default                 | Description                                                 |
-| ---------------------- | ---------- | ----------------------- | ----------------------------------------------------------- |
-| `EXT_NAME`             | yes        | —                       | Must match `name` in `manifest.toml`                        |
-| `TABIBU_URL`           | yes        | `http://localhost:8080` | Base URL of the Tabibu server                               |
-| `TABIBU_API_KEY`       | yes (prod) | —                       | API key issued by `tabibu extension install`                |
-| `EXT_PORT`             | no         | `9000`                  | Port the extension HTTP server listens on                   |
-| `BROKER_URL`           | no         | —                       | AMQP or Kafka URL; omit to disable broker                   |
-| `BROKER_TYPE`          | no         | inferred                | `rabbitmq` or `kafka` (inferred from URL prefix if omitted) |
-| `EXT_SUBSCRIBE_EVENTS` | no         | —                       | Comma-separated event topics to subscribe to                |
-| `TABIBU_DEV`           | no         | —                       | Set to `true` in dev — skips static file serving            |
-
-The SDK calls `godotenv.Load()` on startup, so you can put these in a `.env` file during local development. Existing process environment variables always take precedence.
-
----
-
-## UI extensions
-
-If your extension has a web UI, build it to `ui/dist/` (any framework — `npm run build` is the convention). In production the SDK automatically serves those files from the same HTTP port as the backend, with SPA fallback to `ui/dist/index.html` for client-side routing.
-
-In dev, run the Vite (or equivalent) dev server separately and point Tabibu's proxy at it via the `ui_port` field in `manifest.toml`.
-
-Set `has_ui: true` in `manifest.toml` so the Tabibu app shows the embedded WebView.
-
----
-
-## `manifest.toml` reference
+## manifest.toml reference
 
 ```toml
 [extension]
-name             = "my-extension"
-version          = "1.0.0"
-description      = "What this extension does"
-author           = "Your Name <you@example.com>"
-category         = "billing"          # billing | clinical | admin | other
-min_tabibu       = "1.0.0"
-stop_grace_period = 30                # seconds before force-kill on drain
-
-[extension.events]
-subscribe = [
-    "billing.payment_requested",
-    "billing.bill_cancelled",
-]
+name        = "my-extension"
+version     = "1.0.0"
+description = "Does something useful"
+author      = "You <you@example.com>"
+category    = "billing"
+min_tabibu  = "1.0.0"
 
 [extension.privileges]
-required = "billing.view"             # privilege the extension's JWT will carry
+required = "billing.view"    # leave empty to allow any authenticated user
 
 [extension.ui]
-has_ui = false
-port   = 3100                         # Vite dev server port (dev only)
-path   = "/"
+has_ui   = false
+dev_port = 5173              # Vite port — only used when EXT_DEV=true
+
+[runtime]
+binary            = "bin/my-extension"  # relative path inside the .tabibu package
+stop_grace_period = 30                  # seconds before SIGKILL after shutdown
+
+[[contributes.actions]]
+id      = "billing.pay_mpesa"
+label   = "Pay via M-Pesa"
+context = "billing.bill"
+
+[[contributes.events]]
+subscribe = "billing.payment_requested"
+
+[extension.config]
+shortcode    = ""   # editable in Tabibu admin panel; read via sdk.GetConfig()
+callback_url = ""
 ```
 
 ---
 
-## Dev mode setup
-
-```
-# Terminal 1 — Tabibu server, pointing at your local extension directory
-go run . server start --ext-dev-dir /path/to/my-extension
-
-# Terminal 2 — extension backend
-EXT_NAME=my-extension \
-EXT_PORT=9000 \
-TABIBU_URL=http://localhost:8080 \
-TABIBU_API_KEY=<key-from-install> \
-TABIBU_DEV=true \
-go run .
-
-# Terminal 3 — UI dev server (only for has_ui = true extensions)
-cd ui && npm run dev   # runs on the port configured in manifest.toml
-```
-
-Tabibu auto-registers the extension from `manifest.toml` when `--ext-dev-dir` is supplied — no `tabibu extension install` needed in dev.
-
----
-
-## Production / Docker
-
-A multi-stage Dockerfile for extensions with a UI:
-
-```dockerfile
-FROM node:22-alpine AS ui-builder
-WORKDIR /ui
-COPY ui/package*.json ./
-RUN npm ci
-COPY ui/ .
-RUN npm run build
-
-FROM golang:1.24-alpine AS go-builder
-WORKDIR /src
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 go build -o /extension .
-
-FROM gcr.io/distroless/static-debian12
-COPY --from=ui-builder /ui/dist ui/dist
-COPY --from=go-builder /extension .
-ENTRYPOINT ["./extension"]
-```
-
-For extensions without a UI, omit the `ui-builder` stage.
-
-Install via the Tabibu CLI after pushing your image:
+## Production packaging
 
 ```bash
-tabibu extension install \
-  --name my-extension \
-  --image ghcr.io/your-org/my-extension:1.0.0 \
-  --version 1.0.0 \
-  --category billing
+# 1. Build and package
+tabibu extension build .
+# → my-extension-1.0.0.tabibu
+
+# 2. Install on server
+tabibu extension install ./my-extension-1.0.0.tabibu
+
+# 3. Or install from configured registry
+tabibu extension install my-extension
 ```
+
+The `.tabibu` archive contains:
+```
+my-extension-1.0.0.tabibu
+    manifest.toml
+    bin/
+        my-extension-linux-amd64
+        my-extension-darwin-arm64
+    ui/dist/          (optional, if has_ui = true)
+    signature.sig     (optional, Ed25519 over SHA256 of manifest.toml)
+```
+
+To sign packages, set `TABIBU_SIGN_KEY` to a base64-encoded Ed25519 private key before running `tabibu extension build`. The server verifies the signature when `extensions.registry_public_key` is configured.
 
 ---
 
-## Built-in event types
+## Graceful shutdown
 
-| Constant                    | Topic string                | Published when                                   |
-| --------------------------- | --------------------------- | ------------------------------------------------ |
-| `sdk.EventPaymentRequested` | `billing.payment_requested` | A bill is ready for external collection          |
-| `sdk.EventBillCancelled`    | `billing.bill_cancelled`    | A bill is cancelled — abandon in-flight requests |
+The Extension Runtime sends `{"type":"shutdown","grace_seconds":N}` on stdin. The SDK:
+1. Calls `OnShutdown` (30 s timeout)
+2. Writes `{"type":"drain_done"}` to stdout
+3. Cancels the context and exits 0
+
+If the process doesn't exit within `stop_grace_period` seconds, the Runtime sends SIGTERM then SIGKILL. The `WatchSignal` goroutine inside the SDK handles SIGTERM as a fallback (same drain sequence, same `drain_done` message).
