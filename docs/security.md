@@ -102,12 +102,8 @@ When your extension starts, the supervisor injects a fresh API key as `EXT_API_K
 in your process's environment. The SDK reads it at startup and exchanges it for a JWT
 via `POST /v1/api/extensions/:name/token`.
 
-This JWT is signed with Tabibu's main `AUTH_JWT_SECRET` — not the extension WebView
-secret — so that Tabibu's standard auth middleware can validate it on every API call
-the extension makes back to the server.
-
-The API key is generated fresh per-spawn (64-byte hex string from `crypto/rand`) and
-is revoked immediately when your process exits. If your extension crashes and restarts,
+The API key is generated fresh per server start and is revoked immediately when
+your process exits. If your extension crashes and restarts,
 a new key is issued automatically. The JWT is stored in-memory; `keepAlive` refreshes
 it at the 80% mark. **Never log or expose the API key or JWT.**
 
@@ -238,6 +234,7 @@ that opens a network connection to a compromised external service cannot read Ta
 in-memory state.
 
 What extensions CAN do that you should be aware of:
+
 - **Read and write the Tabibu database** via service calls (as system user).
 - **Call `sdk.HTTPClient()` to hit any Tabibu API endpoint** the system user can reach.
 - **Write to disk** within `EXT_DATA_DIR` (the supervisor owns this directory).
