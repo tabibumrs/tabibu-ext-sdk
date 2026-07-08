@@ -92,6 +92,10 @@ These are set by the Extension Runtime when it spawns your process. You do **not
 | `EXT_DATA_DIR`   | Persistent data directory for this extension                 |
 | `EXT_DEV`        | `"true"` in dev mode — disables static UI serving            |
 | `EXT_SERVER_URL` | Tabibu server URL — used only by `sdk.HTTPClient()`          |
+| `EXT_JWT_SECRET` | Ephemeral HS256 secret for validating WebView JWTs via `sdk.ValidateToken()`. Rotates on every process restart. |
+| `EXT_API_KEY`    | Per-spawn 64-char hex key used by the SDK at startup to exchange a server JWT. Revoked on process exit. Never written to disk. |
+
+Both `EXT_JWT_SECRET` and `EXT_API_KEY` rotate on every process restart and are not recoverable after the process exits. The SDK reads them inside `Run()` — you never access them directly.
 
 ---
 
@@ -128,7 +132,7 @@ shortcode := cfg["shortcode"]
 
 ### `sdk.HTTPClient()`
 
-Returns a `*client` that is pre-authenticated with a JWT (exchanged from the API key written to `$EXT_DATA_DIR/.api_key`). Use this for Tabibu API calls not yet covered by the service layer.
+Returns a `*client` that is pre-authenticated with a JWT (exchanged from `EXT_API_KEY` at startup). Use this for Tabibu API calls not yet covered by the service layer. The client refreshes its token automatically before expiry.
 
 ```go
 resp, err := sdk.HTTPClient().Get(ctx, "/v1/billing/bills/"+billID)
@@ -141,8 +145,8 @@ resp, err := sdk.HTTPClient().Get(ctx, "/v1/billing/bills/"+billID)
 Subscribe to events by declaring them in `manifest.toml`:
 
 ```toml
-[[contributes.events]]
-subscribe = "billing.payment_requested"
+[extension.events]
+subscribe = ["billing.payment_requested"]
 ```
 
 The Extension Runtime subscribes to the broker on your behalf and delivers matching events to `OnEvent` over stdin. Extensions never hold broker credentials.
@@ -227,28 +231,30 @@ category    = "billing"
 min_tabibu  = "1.0.0"
 
 [extension.privileges]
-required = "billing.view"    # leave empty to allow any authenticated user
+required = ["billing:read"]   # array of privilege strings; empty = any authenticated user
 
 [extension.ui]
 has_ui   = false
-dev_port = 5173              # Vite port — only used when EXT_DEV=true
+dev_port = 5173               # Vite port — only used when EXT_DEV=true
 
-[runtime]
-binary            = "bin/my-extension"  # relative path inside the .tabibu package
-stop_grace_period = 30                  # seconds before SIGKILL after shutdown
-
-[[contributes.actions]]
-id      = "billing.pay_mpesa"
-label   = "Pay via M-Pesa"
-context = "billing.bill"
-
-[[contributes.events]]
-subscribe = "billing.payment_requested"
+[extension.events]
+subscribe = ["billing.payment_requested"]
 
 [extension.config]
 shortcode    = ""   # editable in Tabibu admin panel; read via sdk.GetConfig()
 callback_url = ""
+
+[runtime]
+binary            = "my-extension"  # base name; supervisor resolves bin/<name>-<goos>-<goarch>
+stop_grace_period = 30              # seconds before SIGKILL after drain_done
+
+[[contributes.actions]]
+id      = "billing.pay_mpesa"
+label   = "Pay via M-Pesa"
+context = "billing"
 ```
+
+Privilege strings follow the `<module>:<verb>` pattern (e.g. `billing:read`, `patients:read`). All listed privileges must be held by the calling user — an empty array means any authenticated user can access the extension. See [docs/manifest-reference.md](docs/manifest-reference.md) for the full field reference.
 
 ---
 
@@ -266,19 +272,36 @@ tabibu extension install ./my-extension-1.0.0.tabibu
 tabibu extension install my-extension
 ```
 
-The `.tabibu` archive contains:
+The `.tabibu` archive format:
 
 ```
 my-extension-1.0.0.tabibu
+    SHA256SUMS                 # "<hexhash>  <filename>" per entry (sha256sum -b format)
+    signature.sig              # base64(Ed25519Sign(SHA256(SHA256SUMS))); required when registry_public_key is set
     manifest.toml
     bin/
         my-extension-linux-amd64
         my-extension-darwin-arm64
-    ui/dist/          (optional, if has_ui = true)
-    signature.sig     (optional, Ed25519 over SHA256 of manifest.toml)
+        my-extension           # symlink → current platform binary (supervisor uses this)
+    ui/dist/                   (optional, if has_ui = true)
 ```
 
-To sign packages, set `TABIBU_SIGN_KEY` to a base64-encoded Ed25519 private key before running `tabibu extension build`. The server verifies the signature when `extensions.registry_public_key` is configured.
+`SHA256SUMS` lists every file in the archive. `signature.sig` authenticates the entire archive by signing the SHA-256 of `SHA256SUMS` — a single Ed25519 signature covers every file transitively.
+
+To sign packages, set `TABIBU_SIGN_KEY` to a base64-encoded Ed25519 private key before running `tabibu extension build`. The server verifies the signature and each file's hash when `extensions.registry_public_key` is configured in `tabibu.toml`. If `registry_url` is set without a `registry_public_key`, the server refuses to start.
+
+---
+
+## Further reading
+
+The [docs/](docs/) directory contains detailed reference material:
+
+| Document | What it covers |
+|---|---|
+| [docs/overview.md](docs/overview.md) | Architecture, stdio protocol, lifecycle, all environment variables |
+| [docs/tutorial-mpesa-payments.md](docs/tutorial-mpesa-payments.md) | End-to-end tutorial — manifest, Go implementation, packaging, install, dev workflow |
+| [docs/manifest-reference.md](docs/manifest-reference.md) | Every `manifest.toml` key, its type, default, and effect |
+| [docs/security.md](docs/security.md) | Privilege model, authentication paths, PHI handling, API key and JWT lifecycle |
 
 ---
 
