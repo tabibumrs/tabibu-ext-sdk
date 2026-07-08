@@ -73,10 +73,7 @@ func (c *client) keepAlive(ctx context.Context) {
 		c.mu.RUnlock()
 
 		// Sleep until 80% of the token lifetime has elapsed.
-		sleep := remaining * 4 / 5
-		if sleep < 30*time.Second {
-			sleep = 30 * time.Second
-		}
+		sleep := max(remaining*4/5, 30*time.Second)
 
 		select {
 		case <-ctx.Done():
