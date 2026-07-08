@@ -137,7 +137,8 @@ remove   → process stopped, DB row soft-deleted, binary directory optionally r
 | `EXT_DEV`        | `true`                                  | Set in dev mode (Vite hot-reload active)                          |
 | `EXT_SERVER_URL` | `http://localhost:3080`                 | Tabibu server URL for `sdk.HTTPClient()`                          |
 | `EXT_JWT_SECRET` | *(random, 32-byte base64)*              | Ephemeral HS256 secret for validating WebView JWTs via `sdk.ValidateToken()` |
+| `EXT_API_KEY`    | *(random, 64-char hex)*                 | Per-spawn key for exchanging a server JWT at startup; revoked on process exit |
 
 The SDK reads all of these inside `Run()`. You never read them directly.
-`EXT_JWT_SECRET` rotates on every Tabibu server restart — tokens signed with a previous
-secret are automatically invalidated.
+Both `EXT_JWT_SECRET` and `EXT_API_KEY` rotate on every process restart — they are
+never written to disk and are not recoverable after the process exits.

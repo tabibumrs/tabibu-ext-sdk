@@ -20,8 +20,8 @@ import (
 	"time"
 
 	"github.com/BryanMwangi/pine"
-	"github.com/joho/godotenv"
 	"github.com/Nexus-Labs-254/tabibu-ext-sdk/internal"
+	"github.com/joho/godotenv"
 )
 
 // Extension is the interface every Tabibu extension must implement.
@@ -144,10 +144,7 @@ func Run(ext Extension) error {
 	// (the Extension Runtime). No setup needed beyond creating the codec.
 	_conn = internal.NewConn(os.Stdout)
 
-	// Read API key for sdk.HTTPClient() escape hatch.
-	apiKeyPath := filepath.Join(dataDir, ".api_key")
-	apiKeyBytes, _ := os.ReadFile(apiKeyPath)
-	apiKey := strings.TrimSpace(string(apiKeyBytes))
+	apiKey := env("EXT_API_KEY", "")
 	_httpCli = newClient(serverURL, name, apiKey)
 	if apiKey != "" {
 		if err := _httpCli.refreshToken(ctx); err != nil {
@@ -181,7 +178,7 @@ func Run(ext Extension) error {
 	})
 
 	// Send a periodic heartbeat so the supervisor knows we're alive.
-	go sendHeartbeat(ctx, name)
+	go sendHeartbeat(ctx)
 
 	// SIGTERM fallback — primary path is the "shutdown" stdin message.
 	go internal.WatchSignal(ctx, cancel, ext.OnShutdown, _conn)
@@ -226,7 +223,7 @@ func handleMessage(ctx context.Context, cancel context.CancelFunc, ext Extension
 }
 
 // sendHeartbeat writes a heartbeat message to stdout every 30 seconds.
-func sendHeartbeat(ctx context.Context, name string) {
+func sendHeartbeat(ctx context.Context) {
 	pid := os.Getpid()
 	payload, _ := json.Marshal(internal.HeartbeatPayload{PID: pid})
 	ticker := time.NewTicker(30 * time.Second)
