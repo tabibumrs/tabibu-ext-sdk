@@ -86,12 +86,13 @@ type Config map[string]string
 // Log is the SDK's structured logger. Available after Run() has started.
 var Log *Logger
 
-// package-level service singletons — set during Run()
+// package-level singletons — set during Run()
 var (
 	_conn      *internal.Conn
 	_config    Config
 	_httpCli   *client
 	_patients  *patientsService
+	_jwtSecret string // EXT_JWT_SECRET injected by the supervisor; used by ValidateToken
 )
 
 // Patients returns the patients domain service backed by the IPC channel.
@@ -129,6 +130,7 @@ func Run(ext Extension) error {
 	extPort := env("EXT_HTTP_PORT", "9000")
 	devMode := env("EXT_DEV", "") == "true"
 	serverURL := strings.TrimRight(env("EXT_SERVER_URL", "http://localhost:8080"), "/")
+	_jwtSecret = env("EXT_JWT_SECRET", "")
 
 	// Logger writes to EXT_DATA_DIR/logs/extension.log.
 	logDir := filepath.Join(dataDir, "logs")

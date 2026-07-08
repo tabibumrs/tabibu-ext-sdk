@@ -63,20 +63,35 @@ to re-validate the JWT in every handler.
 
 However, if your UI makes secondary API calls back to **your extension's HTTP server
 directly** (not through the `/v1/ui/:name/` proxy), those requests bypass Tabibu's
-validation. Validate the JWT yourself:
+validation. Validate the JWT yourself using `sdk.ValidateToken()`:
 
 ```go
-func (e *Extension) requireAuth(c sdk.Ctx) error {
+import (
+    "net/http"
+    "strings"
+
+    sdk "github.com/Nexus-Labs-254/tabibu-ext-sdk"
+)
+
+func (e *Extension) requireAuth(c sdk.Ctx) (*sdk.TokenClaims, error) {
     tok := strings.TrimPrefix(c.Header("Authorization"), "Bearer ")
     if tok == "" {
-        return c.Status(http.StatusUnauthorized).JSON(map[string]string{"error": "unauthorized"})
+        _ = c.Status(http.StatusUnauthorized).JSON(map[string]string{"error": "unauthorized"})
+        return nil, fmt.Errorf("unauthorized")
     }
-    // The JWT was issued by Tabibu's auth.GenerateExtensionToken.
-    // Verify it using the shared JWT secret (EXT_JWT_SECRET, injected by Tabibu).
-    // sdk.ValidateToken() is a planned helper — until then, use golang-jwt/jwt directly.
-    return nil
+    claims, err := sdk.ValidateToken(tok)
+    if err != nil {
+        _ = c.Status(http.StatusUnauthorized).JSON(map[string]string{"error": "invalid token"})
+        return nil, err
+    }
+    return claims, nil
 }
 ```
+
+`sdk.ValidateToken` uses `EXT_JWT_SECRET` — an ephemeral HS256 secret generated fresh
+on every Tabibu server start. It is **separate from Tabibu's main auth secret**: a
+compromised extension cannot use it to forge user session tokens. Because it rotates on
+every restart, a leaked secret becomes useless once the server is restarted.
 
 In practice, **route all WebView API calls through the `/v1/ui/:name/` proxy** rather
 than hitting your extension port directly — that's what the proxy exists for.
@@ -88,13 +103,17 @@ The SDK reads it at startup and exchanges it for a JWT via
 `POST /v1/admin/extensions/:name/token` (the extension API key auth path, not the
 user JWT path).
 
+This JWT is signed with Tabibu's main `AUTH_JWT_SECRET` — not the extension WebView
+secret — so that Tabibu's standard auth middleware can validate it on every API call
+the extension makes back to the server. The extension never sees this secret directly.
+
 The JWT is stored in-memory and used by `sdk.HTTPClient()` for all calls back to
 Tabibu. `keepAlive` refreshes it automatically at the 80% mark. **Never log or expose
 the API key or JWT.**
 
 ```
 EXT_DATA_DIR/.api_key   → kept secret, readable only by the extension process
-Extension JWT (in-memory) → 1-hour TTL, auto-refreshed
+Extension JWT (in-memory) → 1-hour TTL, auto-refreshed, signed with AUTH_JWT_SECRET
 ```
 
 ### Path C — Broker events
@@ -179,48 +198,35 @@ governance obligations as the core application.
 
 ## Verifying the extension JWT in your UI handlers (reference)
 
-The extension JWT (issued by Tabibu for WebView embedding) is a standard HS256 JWT
-signed with Tabibu's shared `AUTH_JWT_SECRET`. The claims structure is:
+Extension WebView JWTs (issued by `GET /v1/extensions/:name/token`) are HS256 tokens
+signed with an **ephemeral secret** (`EXT_JWT_SECRET`) generated fresh on every Tabibu
+server start. This secret is separate from Tabibu's main `AUTH_JWT_SECRET`.
+
+The claims structure is:
 
 ```json
 {
   "sub": "mpesa-payments",
+  "user_id": "00000000-0000-0000-0000-000000000000",
   "privileges": ["billing:read", "patients:read"],
   "exp": 1234567890
 }
 ```
 
-If you need to validate it yourself (e.g., for API endpoints on your extension's port
-that are NOT proxied through `/v1/ui/:name/`):
+Use `sdk.ValidateToken()` — it reads `EXT_JWT_SECRET` from the environment automatically:
 
 ```go
-import "github.com/golang-jwt/jwt/v5"
-
-type ExtClaims struct {
-    Privileges []string `json:"privileges"`
-    jwt.RegisteredClaims
+claims, err := sdk.ValidateToken(tok)
+if err != nil {
+    return c.Status(http.StatusUnauthorized).JSON(map[string]string{"error": "invalid token"})
 }
-
-func parseExtToken(tokenStr, secret string) (*ExtClaims, error) {
-    tok, err := jwt.ParseWithClaims(tokenStr, &ExtClaims{},
-        func(t *jwt.Token) (any, error) {
-            if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-                return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
-            }
-            return []byte(secret), nil
-        })
-    if err != nil {
-        return nil, err
-    }
-    if claims, ok := tok.Claims.(*ExtClaims); ok && tok.Valid {
-        return claims, nil
-    }
-    return nil, fmt.Errorf("invalid token")
-}
+// claims.ExtensionName == "mpesa-payments"
+// claims.Privileges   == ["billing:read", "patients:read"]
 ```
 
-Tabibu injects the JWT secret as `EXT_JWT_SECRET` (planned — not yet implemented).
-Until that env var is available, share the secret via a secure config value.
+The secret is injected by the supervisor as `EXT_JWT_SECRET` and is available to
+all extension processes. It rotates on every Tabibu server restart — a leaked secret
+is automatically invalidated the next time the server starts.
 
 ---
 

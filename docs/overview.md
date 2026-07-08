@@ -129,12 +129,15 @@ remove   → process stopped, DB row soft-deleted, binary directory optionally r
 
 ## Environment variables injected by Tabibu
 
-| Variable         | Example value                    | Description                              |
-|------------------|----------------------------------|------------------------------------------|
-| `EXT_NAME`       | `mpesa-payments`                 | The extension's registered name          |
-| `EXT_HTTP_PORT`  | `9001`                           | Port your HTTP server must listen on     |
-| `EXT_DATA_DIR`   | `/var/tabibu/extensions/mpesa-payments` | Root for logs, data, API key file |
-| `EXT_DEV`        | `true`                           | Set in dev mode (Vite hot-reload active) |
-| `EXT_SERVER_URL` | `http://localhost:3080`          | Tabibu server URL for HTTPClient()       |
+| Variable         | Example value                           | Description                                                       |
+|------------------|-----------------------------------------|-------------------------------------------------------------------|
+| `EXT_NAME`       | `mpesa-payments`                        | The extension's registered name                                   |
+| `EXT_HTTP_PORT`  | `9001`                                  | Port your HTTP server must listen on                              |
+| `EXT_DATA_DIR`   | `/var/tabibu/extensions/mpesa-payments` | Root for logs, data, API key file                                 |
+| `EXT_DEV`        | `true`                                  | Set in dev mode (Vite hot-reload active)                          |
+| `EXT_SERVER_URL` | `http://localhost:3080`                 | Tabibu server URL for `sdk.HTTPClient()`                          |
+| `EXT_JWT_SECRET` | *(random, 32-byte base64)*              | Ephemeral HS256 secret for validating WebView JWTs via `sdk.ValidateToken()` |
 
 The SDK reads all of these inside `Run()`. You never read them directly.
+`EXT_JWT_SECRET` rotates on every Tabibu server restart — tokens signed with a previous
+secret are automatically invalidated.
