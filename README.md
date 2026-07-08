@@ -180,8 +180,7 @@ tabibu server start --dev --ext-dev-dir ./path/to/my-extension
 the server:
 
 1. Reads `manifest.toml` from the dev path
-2. Registers the extension in the DB (idempotent)
-3. Spawns `go run .` in the source directory with `EXT_DEV=true`
+2. Spawns `go run .` in the source directory with `EXT_DEV=true`
 
 Reload after a Go change:
 
